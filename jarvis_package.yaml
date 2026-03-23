@@ -1,0 +1,13 @@
+name: "lifx"
+display_name: "LIFX"
+description: "LIFX smart lights — zero-cloud LAN discovery and control over UDP. Supports color, brightness, and color temperature."
+version: "1.0.0"
+min_jarvis_version: "0.9.0"
+license: "MIT"
+author:
+  github: "alexberardi"
+categories: ["smart-home", "lighting"]
+platforms: ["darwin", "linux"]
+keywords: ["lifx", "smart light", "bulb", "color", "lan"]
+packages:
+  - name: lifxlan
