@@ -145,7 +145,7 @@ class LifxProtocol(IJarvisDeviceProtocol):
         logger.info(f"LIFX discovery found {len(devices)} device(s)")
         return devices
 
-    async def control_device(
+    async def control(
         self, device: DiscoveredDevice, action: str, params: dict[str, Any] | None = None
     ) -> DeviceControlResult:
         try:
