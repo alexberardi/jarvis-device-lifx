@@ -3,7 +3,7 @@ display_name: "LIFX"
 description: "LIFX smart lights — zero-cloud LAN discovery and control over UDP. Supports color, brightness, and color temperature."
 version: "1.0.0"
 min_jarvis_version: "0.9.0"
-license: "MIT"
+license: Apache-2.0
 author:
   github: "alexberardi"
 categories: ["smart-home", "lighting"]
