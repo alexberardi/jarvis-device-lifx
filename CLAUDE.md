@@ -2,7 +2,7 @@
 
 ## Loop (agents)
 
-**LIFX**: LIFX smart lights — zero-cloud LAN discovery and control over UDP. A Jarvis package () that nodes install through Pantry.
+**LIFX**: LIFX smart lights — zero-cloud LAN discovery and control over UDP. A Jarvis package (device_protocol) that nodes install through Pantry.
 
 **Verify** (what CI runs: `.github/workflows/ci.yml` calls the toolkit's reusable `package-ci.yml`) (no `tests/` yet; CI runs `python -m pytest tests` once one exists):
 
