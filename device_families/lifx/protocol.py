@@ -70,6 +70,28 @@ def _hsbk_to_rgb(h: int, s: int, b: int) -> tuple[int, int, int]:
     return int(r_float * 255), int(g_float * 255), int(b_float * 255)
 
 
+def _entity_id(label: str, mac: str, ip: str) -> str:
+    """Stable id for a light: slug of its label, else of its MAC, else its IP."""
+    return _slugify(label) if label else (_slugify(mac) if mac else ip)
+
+
+async def _connect(ip: str, mac: str) -> Any:
+    """Return a lifxlan Light at ``ip``.
+
+    lifxlan addresses a light by MAC as well as IP. Use ``mac`` when the caller
+    has it; otherwise scan the LAN for the light answering at ``ip``.
+    """
+    from lifxlan import LifxLAN, Light
+
+    if mac:
+        return Light(mac, ip)
+    lights = await asyncio.to_thread(LifxLAN().get_lights) or []
+    for light in lights:
+        if light.get_ip_addr() == ip:
+            return light
+    raise OSError(f"no LIFX light found at {ip}")
+
+
 class LifxProtocol(IJarvisDeviceProtocol):
     """LIFX LAN protocol adapter."""
 
@@ -81,24 +103,13 @@ class LifxProtocol(IJarvisDeviceProtocol):
     @property
     def supported_actions(self) -> list[IJarvisButton]:
         return [
-            IJarvisButton(
-                action="turn_on",
-                label="Turn On",
-                icon="lightbulb-on",
-            ),
-            IJarvisButton(
-                action="turn_off",
-                label="Turn Off",
-                icon="lightbulb-off",
-            ),
-            IJarvisButton(
-                action="toggle",
-                label="Toggle",
-                icon="lightbulb-outline",
-            ),
+            IJarvisButton("Turn On", "turn_on", "primary", "lightbulb-on"),
+            IJarvisButton("Turn Off", "turn_off", "secondary", "lightbulb-off"),
+            IJarvisButton("Toggle", "toggle", "secondary", "lightbulb-outline"),
         ]
 
-    async def discover_devices(self, timeout: int = 5) -> list[DiscoveredDevice]:
+    async def discover(self, timeout: float = 5.0) -> list[DiscoveredDevice]:
+        # lifxlan's get_lights() takes no timeout: its broadcast window is fixed.
         try:
             from lifxlan import LifxLAN
         except ImportError:
@@ -108,7 +119,7 @@ class LifxProtocol(IJarvisDeviceProtocol):
         devices: list[DiscoveredDevice] = []
         try:
             lan = LifxLAN()
-            lights = await asyncio.to_thread(lan.get_lights, timeout=timeout)
+            lights = await asyncio.to_thread(lan.get_lights)
         except Exception as e:
             logger.error(f"LIFX discovery failed: {e}")
             return []
@@ -119,23 +130,21 @@ class LifxProtocol(IJarvisDeviceProtocol):
 
         for light in lights:
             try:
-                label: str = light.get_label() or ""
+                label: str = await asyncio.to_thread(light.get_label) or ""
                 mac_addr: str = _mac_to_str(light.get_mac_addr())
                 ip_addr: str = light.get_ip_addr() or ""
-                product: str = str(getattr(light, "product", "")) or "LIFX Light"
-
-                device_id: str = _slugify(label) if label else _slugify(mac_addr)
+                product: str = await asyncio.to_thread(light.get_product_name) or "LIFX Light"
 
                 devices.append(
                     DiscoveredDevice(
-                        id=device_id,
                         name=label or "LIFX Light",
                         domain="light",
-                        protocol=self.protocol_name,
-                        ip=ip_addr,
-                        mac=mac_addr,
-                        model=product,
                         manufacturer="LIFX",
+                        model=product,
+                        protocol=self.protocol_name,
+                        entity_id=_entity_id(label, mac_addr, ip_addr),
+                        local_ip=ip_addr or None,
+                        mac_address=mac_addr or None,
                     )
                 )
             except Exception as e:
@@ -146,102 +155,97 @@ class LifxProtocol(IJarvisDeviceProtocol):
         return devices
 
     async def control(
-        self, device: DiscoveredDevice, action: str, params: dict[str, Any] | None = None
+        self,
+        ip: str,
+        action: str,
+        data: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> DeviceControlResult:
-        try:
-            from lifxlan import Light
-        except ImportError:
+        def fail(error: str, entity_id: str = ip) -> DeviceControlResult:
             return DeviceControlResult(
-                success=False,
-                message="lifxlan is not installed. Run: pip install lifxlan",
+                success=False, entity_id=entity_id, action=action, error=error
             )
 
-        params = params or {}
-        ip: str = device.ip or ""
-        mac: str = device.mac or ""
-        if not ip or not mac:
-            return DeviceControlResult(success=False, message="No IP or MAC address for device")
-
         try:
-            light = Light(mac, ip)
+            import lifxlan  # noqa: F401
+        except ImportError:
+            return fail("lifxlan is not installed. Run: pip install lifxlan")
+
+        data = data or {}
+        if not ip:
+            return fail("No IP address for device")
+
+        mac: str = kwargs.get("mac_address") or ""
+        try:
+            light = await _connect(ip, mac)
+            label: str = await asyncio.to_thread(light.get_label) or ""
         except Exception as e:
-            return DeviceControlResult(success=False, message=f"Failed to connect to LIFX device: {e}")
+            return fail(f"Failed to connect to LIFX device at {ip}: {e}")
+
+        entity_id: str = _entity_id(label, _mac_to_str(light.get_mac_addr()), ip)
+        ok = DeviceControlResult(success=True, entity_id=entity_id, action=action)
 
         try:
             if action == "turn_on":
                 await asyncio.to_thread(light.set_power, 65535)
-                return DeviceControlResult(success=True, message=f"{device.name} turned on")
+                return ok
 
             elif action == "turn_off":
                 await asyncio.to_thread(light.set_power, 0)
-                return DeviceControlResult(success=True, message=f"{device.name} turned off")
+                return ok
 
             elif action == "toggle":
                 power = await asyncio.to_thread(light.get_power)
-                if power > 0:
-                    await asyncio.to_thread(light.set_power, 0)
-                    new_state = "off"
-                else:
-                    await asyncio.to_thread(light.set_power, 65535)
-                    new_state = "on"
-                return DeviceControlResult(success=True, message=f"{device.name} toggled {new_state}")
+                await asyncio.to_thread(light.set_power, 0 if power > 0 else 65535)
+                return ok
 
             elif action == "set_brightness":
-                brightness_pct: int = int(params.get("brightness", 100))
+                brightness_pct: int = int(data.get("brightness", 100))
                 brightness_pct = max(0, min(100, brightness_pct))
                 brightness_val: int = int(brightness_pct / 100.0 * 65535)
                 await asyncio.to_thread(light.set_brightness, brightness_val)
-                return DeviceControlResult(
-                    success=True, message=f"{device.name} brightness set to {brightness_pct}%"
-                )
+                return ok
 
             elif action == "set_color":
-                if "rgb" in params:
-                    rgb = params["rgb"]
+                if "rgb" in data:
+                    rgb = data["rgb"]
                     r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
                     hue, saturation, brightness = _rgb_to_hsbk_components(r, g, b)
-                    kelvin: int = int(params.get("color_temp", 3500))
+                    kelvin: int = int(data.get("color_temp", 3500))
                     color: list[int] = [hue, saturation, brightness, kelvin]
                     await asyncio.to_thread(light.set_color, color)
-                    return DeviceControlResult(
-                        success=True, message=f"{device.name} color set to RGB({r},{g},{b})"
-                    )
-                elif "color_temp" in params:
-                    kelvin = int(params["color_temp"])
+                    return ok
+                elif "color_temp" in data:
+                    kelvin = int(data["color_temp"])
                     current_color = await asyncio.to_thread(light.get_color)
                     color = [current_color[0], 0, current_color[2], kelvin]
                     await asyncio.to_thread(light.set_color, color)
-                    return DeviceControlResult(
-                        success=True, message=f"{device.name} color temp set to {kelvin}K"
-                    )
+                    return ok
                 else:
-                    return DeviceControlResult(
-                        success=False, message="set_color requires 'rgb' or 'color_temp' param"
-                    )
+                    return fail("set_color requires 'rgb' or 'color_temp' param", entity_id)
 
             else:
-                return DeviceControlResult(success=False, message=f"Unsupported action: {action}")
+                return fail(f"Unsupported action: {action}", entity_id)
 
         except Exception as e:
-            return DeviceControlResult(success=False, message=f"Control failed: {e}")
+            return fail(f"Control failed: {e}", entity_id)
 
-    async def get_state(self, device: DiscoveredDevice) -> dict[str, Any]:
+    async def get_state(self, ip: str, **kwargs: Any) -> dict[str, Any] | None:
         try:
-            from lifxlan import Light
+            import lifxlan  # noqa: F401
         except ImportError:
             return {"error": "lifxlan is not installed"}
 
-        ip: str = device.ip or ""
-        mac: str = device.mac or ""
-        if not ip or not mac:
-            return {"error": "No IP or MAC address for device"}
+        if not ip:
+            return {"error": "No IP address for device"}
 
+        mac: str = kwargs.get("mac_address") or ""
         try:
-            light = Light(mac, ip)
+            light = await _connect(ip, mac)
             power: int = await asyncio.to_thread(light.get_power)
             color: tuple[int, ...] = await asyncio.to_thread(light.get_color)
         except Exception as e:
-            return {"error": f"Failed to get state: {e}"}
+            return {"error": f"Failed to get state from {ip}: {e}"}
 
         h, s, b, k = color[0], color[1], color[2], color[3]
         brightness_pct: int = int(b / 65535.0 * 100)
